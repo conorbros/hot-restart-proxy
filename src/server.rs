@@ -2,6 +2,7 @@ use anyhow::Result;
 use net2::{unix::UnixTcpBuilderExt, TcpBuilder};
 use std::fs;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::signal::unix::{signal, SignalKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,33 +38,31 @@ impl Server {
         Ok(())
     }
 
-    async fn connection_handler(mut socket: TcpStream, upstream: String) -> Result<()> {
-        let (mut client_r, _client_w) = socket.split();
+    async fn server(self) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:8080").await?;
 
-        let mut stream = TcpStream::connect(upstream).await?;
-        let (_upstream_r, mut upstream_w) = stream.split();
+        let mut interrupt = signal(SignalKind::interrupt()).unwrap();
 
         tokio::select! {
-              _ = tokio::io::copy(&mut client_r, &mut upstream_w) => {},
-        }
+            _ = async {
+                loop {
+                    let (mut socket, _) = listener.accept().await?;
+                    let upstream = self.upstream.clone();
+                    tokio::spawn(async move {
+                        let (mut client_r, _client_w) = socket.split();
+
+                        let mut stream = TcpStream::connect(upstream).await.unwrap();
+                        let (_upstream_r, mut upstream_w) = stream.split();
+                        tokio::io::copy(&mut client_r, &mut upstream_w).await.unwrap();
+                    });
+                }
+
+                #[allow(unreachable_code)]
+                Ok::<_, tokio::io::Error>(())
+            } => {},
+            _ = interrupt.recv() => {},
+        };
 
         Ok(())
-    }
-
-    async fn server(self) -> Result<()> {
-        let listener = TcpListener::from_std(
-            TcpBuilder::new_v4()?
-                .reuse_address(true)?
-                .reuse_port(true)?
-                .bind("127.0.0.1:8080")?
-                .listen(42)?,
-        )?;
-
-        loop {
-            if let Ok((socket, _address)) = listener.accept().await {
-                let upstream = self.upstream.clone();
-                tokio::spawn(async move { Server::connection_handler(socket, upstream).await });
-            }
-        }
     }
 }
