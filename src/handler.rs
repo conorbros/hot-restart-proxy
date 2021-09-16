@@ -1,32 +1,34 @@
 use anyhow::Result;
+use std::os::unix::prelude::AsRawFd;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 
-use crate::shutdown::Shutdown;
+use crate::{connections::SocketPair, shutdown::Shutdown};
 
 #[derive(Debug)]
 pub struct Handler {
-    pub socket: TcpStream,
-    pub upstream: String,
     pub shutdown: Shutdown,
-    pub _shutdown_complete: mpsc::Sender<()>,
+    pub shutdown_complete: mpsc::UnboundedSender<SocketPair>,
     pub limit_connections: Arc<Semaphore>,
 }
 
 impl Handler {
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(mut self, mut client: TcpStream, mut upstream: TcpStream) -> Result<()> {
         while !self.shutdown.is_shutdown() {
-            let mut upstream = TcpStream::connect(&self.upstream).await?;
-
-            let (mut client_r, _client_w) = self.socket.split();
+            let (mut client_r, _client_w) = client.split();
             let (_upstream_r, mut upstream_w) = upstream.split();
 
             tokio::select! {
                 _ = tokio::io::copy(&mut client_r, &mut upstream_w) => {}
                 _ = self.shutdown.recv() => {
-                    return Ok(());
+                    self.shutdown_complete.send(SocketPair{
+                            client,
+                            upstream
+                        }
+                    );
+                    return Ok(())
                 }
             };
         }

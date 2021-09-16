@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio::sync::{watch, Semaphore};
 
+use crate::connections::SocketPair;
 use crate::listener::Listener;
 
 const MAX_CONNECTIONS: usize = 250;
@@ -41,7 +42,7 @@ impl Server {
         let tcp_listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
         let (notify_shutdown, _) = broadcast::channel(1);
-        let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
+        let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::unbounded_channel::<SocketPair>();
 
         let mut listener = Listener {
             listener: tcp_listener,
@@ -73,6 +74,8 @@ impl Server {
         drop(notify_shutdown);
         drop(shutdown_complete_tx);
 
-        let _ = shutdown_complete_rx.recv().await;
+        println!("{:?}", shutdown_complete_rx.recv().await);
+        println!("{:?}", shutdown_complete_rx.recv().await);
+        println!("{:?}", shutdown_complete_rx.recv().await);
     }
 }

@@ -5,15 +5,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time;
 
-use crate::handler::Handler;
-use crate::shutdown::Shutdown;
+use crate::{connections::SocketPair, handler::Handler, shutdown::Shutdown};
 
 pub struct Listener {
     pub listener: TcpListener,
     pub upstream: String,
     pub notify_shutdown: broadcast::Sender<()>,
-    pub shutdown_complete_rx: mpsc::Receiver<()>,
-    pub shutdown_complete_tx: mpsc::Sender<()>,
+    pub shutdown_complete_rx: mpsc::UnboundedReceiver<SocketPair>,
+    pub shutdown_complete_tx: mpsc::UnboundedSender<SocketPair>,
     pub limit_connections: Arc<Semaphore>,
 }
 
@@ -22,18 +21,17 @@ impl Listener {
         loop {
             self.limit_connections.acquire().await.unwrap().forget();
 
-            let socket = self.accept().await?;
+            let client = self.accept().await?;
+            let upstream = TcpStream::connect(&self.upstream).await?;
 
-            let mut handler = Handler {
-                socket,
-                upstream: self.upstream.clone(),
+            let handler = Handler {
                 shutdown: Shutdown::new(self.notify_shutdown.subscribe()),
-                _shutdown_complete: self.shutdown_complete_tx.clone(),
+                shutdown_complete: self.shutdown_complete_tx.clone(),
                 limit_connections: self.limit_connections.clone(),
             };
 
             tokio::spawn(async move {
-                if let Err(err) = handler.run().await {
+                if let Err(err) = handler.run(client, upstream).await {
                     eprintln!("{} connection error", err);
                 }
             });

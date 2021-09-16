@@ -1,3 +1,6 @@
+use std::os::unix::io::RawFd;
+use tokio::net::TcpStream;
+
 // use crate::ipc::Resources;
 // use std::sync::RwLock;
 
@@ -41,3 +44,10 @@
 //         }
 //     }
 // }
+//
+
+#[derive(Debug)]
+pub struct SocketPair {
+    pub client: TcpStream,
+    pub upstream: TcpStream,
+}
