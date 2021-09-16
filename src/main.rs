@@ -13,7 +13,8 @@ async fn main() -> Result<()> {
 
     server::Server::new("config/config.yaml".to_string())?
         .set_takeover(matches.is_present("takeover"))
-        .startup()?;
+        .startup()
+        .await?;
 
     Ok(())
 }

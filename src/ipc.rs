@@ -17,14 +17,14 @@ pub struct Resources {
     pub clients: HashMap<String, Handle<TcpStream>>,
 }
 
-pub fn unix_socket_bootstrap() -> (Bootstrapper<Message>, Receiver<Message>) {
+pub fn _unix_socket_bootstrap() -> (Bootstrapper<Message>, Receiver<Message>) {
     let bootstrapper = unix_ipc::Bootstrapper::<Message>::bind("/tmp/proto-socket").unwrap();
     let (tx, rx) = unix_ipc::channel::<Message>().unwrap();
     bootstrapper.send(Message::Sender(tx)).unwrap();
     (bootstrapper, rx)
 }
 
-pub fn unix_socket_listen() -> (Sender<Message>, Receiver<Message>) {
+pub fn _unix_socket_listen() -> (Sender<Message>, Receiver<Message>) {
     let rx = Receiver::<Message>::connect("/tmp/proto-socket").unwrap();
     let tx = match rx.recv().unwrap() {
         Message::Sender(tx) => tx,
