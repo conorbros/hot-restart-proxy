@@ -7,6 +7,8 @@ use clap::{App, Arg};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    console_subscriber::init();
+
     let matches = App::new("Hot Reload Proxy")
         .arg(Arg::with_name("takeover").short("t"))
         .get_matches();
