@@ -1,10 +1,14 @@
 use anyhow::Result;
-use net2::{unix::UnixTcpBuilderExt, TcpBuilder};
-use std::fs;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::signal::unix::{signal, SignalKind};
-
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{watch, Semaphore};
+
+use crate::listener::Listener;
+
+const MAX_CONNECTIONS: usize = 250;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Config {
@@ -33,36 +37,42 @@ impl Server {
         self
     }
 
-    pub async fn startup(self) -> Result<()> {
-        self.server().await?;
-        Ok(())
-    }
+    pub async fn run(self, mut shutdown_rx: watch::Receiver<bool>) {
+        let tcp_listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
-    async fn server(self) -> Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:8080").await?;
+        let (notify_shutdown, _) = broadcast::channel(1);
+        let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
 
-        let mut interrupt = signal(SignalKind::interrupt()).unwrap();
-
-        tokio::select! {
-            _ = async {
-                loop {
-                    let (mut socket, _) = listener.accept().await?;
-                    let upstream = self.upstream.clone();
-                    tokio::spawn(async move {
-                        let (mut client_r, _client_w) = socket.split();
-
-                        let mut stream = TcpStream::connect(upstream).await.unwrap();
-                        let (_upstream_r, mut upstream_w) = stream.split();
-                        tokio::io::copy(&mut client_r, &mut upstream_w).await.unwrap();
-                    });
-                }
-
-                #[allow(unreachable_code)]
-                Ok::<_, tokio::io::Error>(())
-            } => {},
-            _ = interrupt.recv() => {},
+        let mut listener = Listener {
+            listener: tcp_listener,
+            upstream: self.upstream,
+            notify_shutdown,
+            shutdown_complete_rx,
+            shutdown_complete_tx,
+            limit_connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         };
 
-        Ok(())
+        tokio::select! {
+            res = listener.run() => {
+                if let Err(err) = res {
+                    eprintln!("{}", err);
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                println!("shutting down");
+            }
+        }
+
+        let Listener {
+            mut shutdown_complete_rx,
+            shutdown_complete_tx,
+            notify_shutdown,
+            ..
+        } = listener;
+
+        drop(notify_shutdown);
+        drop(shutdown_complete_tx);
+
+        let _ = shutdown_complete_rx.recv().await;
     }
 }

@@ -13,7 +13,8 @@ server.on('connection', function(socket) {
     //process.stdout.write("+");
 
     socket.on('data', function(chunk) {
-        process.stdout.write(".");
+        console.log(chunk.toString());
+        //process.stdout.write(".");
     });
 
     // socket.on('end', function() {
