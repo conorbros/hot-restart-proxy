@@ -1,47 +1,25 @@
 ---
 name: "tagged-release"
 
-# on:
-#   push:
-#     tags:
-#       - "v*"
-
 on:
   push:
-    branches: [master]
+    tags:
+      - "v*"
 
 jobs:
-  tagged-release:
-    name: "Tagged Release"
-    runs-on: ubuntu-20.04
-
+  publish-image:
+    runs-on: ubuntu-latest
     steps:
+      -
+        name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: actions/checkout@v2
-      - name: Install latest stable
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - name: Build & test
+      -
+        name: Push image
         run: |
-          # build glibc
-          cargo build --release
-          mkdir -p hot-restart-proxy-release
-          cp target/debug/hot-restart-proxy hot-restart-proxy-release
-          tar -cvzf hot-restart-proxy-proxy-linux_amd64-"$(cargo metadata --format-version 1 --offline --no-deps | jq -c -M -r '.packages[0].version')".tar.gz hot-restart-proxy-release
-          rm -rf hot-restart-proxy-release
-
-          # build musl
-          mkdir -p hot-restart-proxy-release
-          docker run --rm -v "$(pwd)":/home/rust/src ekidd/rust-musl-builder bash -c "sudo chown -R rust:rust .; cargo build --release"
-          sudo chown -R $USER:$USER .
-          cp target/x86_64-unknown-linux-musl/debug/hot-restart-proxy hot-restart-proxy-release
-          tar -cvzf hot-restart-proxy-static_linux_amd64-"$(cargo metadata --format-version 1 --offline --no-deps | jq -c -M -r '.packages[0].version')".tar.gz hot-restart-proxy-release
-          rm -rf hot-restart-proxy-release
-      - name: Publish
-        uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: false
-          files: |
-            *.tar.gz
+          docker build -t conorbros/hot-restart-proxy:latest -t conorbros/hot-restart-proxy:${GITHUB_REF/refs\/tags\//} .
+          docker push conorbros/hot-restart-proxy:latest
+          docker push conorbros/hot-restart-proxy:${GITHUB_REF/refs\/tags\//}
