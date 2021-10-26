@@ -1,23 +1,24 @@
 use anyhow::Result;
-use net2::{unix::UnixTcpBuilderExt, TcpBuilder};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::{fs, sync::Arc};
-
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::sync::Arc;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{watch, Semaphore};
 
-use crate::{
-    connections::Connections,
-    ipc::{unix_socket_bootstrap, unix_socket_listen, Message},
-};
+use crate::ipc::{self, unix_socket_listen, Message, SocketPair};
+use crate::listener::Listener;
+
+const MAX_CONNECTIONS: usize = 250;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Config {
-    upstreams: Vec<String>,
+    upstream: String,
 }
 
+#[derive(Clone)]
 pub struct Server {
-    config: Config,
+    upstream: String,
     takeover: bool,
 }
 
@@ -27,148 +28,86 @@ impl Server {
         let config: Config = serde_yaml::from_str(&config_file)?;
 
         Ok(Server {
-            config,
+            upstream: config.upstream,
             takeover: false,
         })
     }
 
-    pub fn set_takeover(mut self, v: bool) -> Self {
-        self.takeover = v;
-        self
-    }
+    async fn get_resources() -> Result<(Vec<SocketPair>, tokio_unix_ipc::Sender<Message>)> {
+        let (tx, rx) = unix_socket_listen().await.unwrap();
+        tx.send(Message::Takeover()).await.unwrap();
 
-    pub fn startup(self) -> Result<()> {
-        let conns = if self.takeover {
-            self.takeover_startup()?
-        } else {
-            self.normal_startup()?
-        };
-
-        let conns_clone = conns.clone();
-        std::thread::spawn(move || {
-            let (tx, rx) = unix_socket_bootstrap();
-
-            loop {
-                match rx.recv().unwrap() {
-                    Message::Takeover() => tx
-                        .send(Message::Resources(conns_clone.as_ref().into()))
-                        .unwrap(),
-                    Message::Shutdown() => break,
-                    _ => panic!("unhandled message"),
-                }
-            }
-
-            std::process::exit(0);
-        });
-
-        server(conns)?;
-        Ok(())
-    }
-
-    fn takeover_startup(self) -> Result<Arc<Connections>> {
-        let (tx, rx) = unix_socket_listen();
-        tx.send(Message::Takeover())?;
-
-        let mut resources = match rx.recv()? {
+        let resources = match rx.recv().await.unwrap() {
             Message::Resources(r) => r,
-            _ => panic!("wrong response to takeover"),
+            _ => panic!("invalid response to Message::Takeover"),
         };
 
-        let conns = Connections::new();
+        let mut socket_pairs = Vec::<SocketPair>::new();
 
-        {
-            let mut servers = conns.upstream.write().unwrap();
-            for host in self.config.upstreams.iter() {
-                if let Some(fd) = resources.upstreams.remove(host) {
-                    let stream = fd.into_inner();
-                    servers.insert(host.to_string(), stream);
-                } else {
-                    let addr: std::net::SocketAddr = host.parse()?;
-                    let stream = TcpStream::connect(addr)?;
-                    servers.insert(host.to_string(), stream);
+        for socket_pair in resources.socket_pairs {
+            socket_pairs.push(SocketPair {
+                client: TcpStream::from_std(socket_pair.client.into_inner())?,
+                upstream: TcpStream::from_std(socket_pair.upstream.into_inner())?,
+            })
+        }
+
+        Ok((socket_pairs, tx))
+    }
+
+    pub async fn run(
+        self,
+        takeover: bool,
+        mut shutdown_rx: watch::Receiver<bool>,
+        handover_tx: mpsc::UnboundedSender<ipc::Socket>,
+    ) {
+        println!("listening on 127.0.0.1:8080");
+
+        let (notify_shutdown, _) = broadcast::channel(1);
+        let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::unbounded_channel::<()>();
+
+        let mut listener = Listener {
+            listener: None,
+            upstream: self.upstream,
+            notify_shutdown,
+            shutdown_complete_rx,
+            shutdown_complete_tx,
+            handover_tx: handover_tx.clone(),
+            limit_connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        };
+
+        if takeover {
+            let (socket_pairs, tx) = Server::get_resources().await.unwrap();
+            listener.handover_run(socket_pairs).await.unwrap();
+
+            tx.send(Message::Shutdown()).await.unwrap();
+        } else {
+            let tcp_listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+            listener.listener = Some(tcp_listener);
+        }
+
+        tokio::select! {
+            res = listener.run() => {
+                if let Err(err) = res {
+                    eprintln!("{}", err);
                 }
             }
-
-            let mut client = conns.client.write().unwrap();
-            for (host, socket) in resources.clients.into_iter() {
-                client.insert(host.to_string(), socket.into_inner());
+            _ = shutdown_rx.changed() => {
+                println!("shutting down");
             }
         }
 
-        tx.send(Message::Shutdown())?;
-        Ok(Arc::new(conns))
-    }
+        let Listener {
+            shutdown_complete_tx,
+            notify_shutdown,
+            ..
+        } = listener;
 
-    fn normal_startup(self) -> Result<Arc<Connections>> {
-        let conns = Connections::new();
+        drop(notify_shutdown);
+        drop(shutdown_complete_tx);
 
-        {
-            let mut servers = conns.upstream.write().unwrap();
-            for host in self.config.upstreams.iter() {
-                let addr: std::net::SocketAddr = host.parse()?;
-                let stream = TcpStream::connect(addr)?;
-                servers.insert(host.to_string(), stream);
-            }
-        }
-
-        Ok(Arc::new(conns))
-    }
-}
-
-fn connection_handler<A: 'static + ToString + std::marker::Send>(
-    mut socket: TcpStream,
-    address: A,
-    conns: Arc<Connections>,
-) {
-    std::thread::spawn(move || {
-        loop {
-            let mut buf = [0; 1024];
-            match socket.read(&mut buf) {
-                Ok(n) if n == 0 => break,
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("failed to read from socket; err = {:?}", e);
-                    break;
-                }
-            };
-
-            {
-                let mut w = conns.upstream.write().unwrap();
-                w.retain(|_, socket| {
-                    if socket.write_all(&buf).is_err() {
-                        false
-                    } else {
-                        true
-                    }
-                })
-            }
-        }
-        let mut fds = conns.client.write().unwrap();
-        fds.remove(&address.to_string());
-    });
-}
-
-fn server(conns: Arc<Connections>) -> Result<()> {
-    let listener = TcpBuilder::new_v4()?
-        .reuse_address(true)?
-        .reuse_port(true)?
-        .bind("127.0.0.1:8080")?
-        .listen(42)?;
-
-    {
-        let client = conns.client.write().unwrap();
-        client.iter().for_each(|(host, socket)| {
-            connection_handler(socket.try_clone().unwrap(), host.to_string(), conns.clone())
-        });
-    }
-
-    loop {
-        if let Ok((socket, address)) = listener.accept() {
-            {
-                let mut client = conns.client.write().unwrap();
-                client.insert(address.to_string(), socket.try_clone()?);
-            };
-            connection_handler(socket, address, conns.clone());
-        }
+        match listener.listener {
+            Some(l) => handover_tx.send(ipc::Socket::Listener(l)).unwrap(),
+            _ => {}
+        };
     }
 }

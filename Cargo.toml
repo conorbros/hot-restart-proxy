@@ -8,9 +8,10 @@ edition = "2018"
 [dependencies]
 nix = "0.18.0"
 tokio = { version = "1.11.0", features = ["full"] }
+#console-subscriber = { path = "/home/conor/src/3rd-party/console/console-subscriber"}
 clap = "2.33.3"
 anyhow = "1.0.32"
 serde = {version="1.0.130", features=["derive"]}
 serde_yaml = "0.8.20"
-unix-ipc = {version="0.2.0", features = ["serde", "bootstrap", "bootstrap-simple"]}
-net2 = "0.2.37"
+#tokio-unix-ipc = { path="/home/conor/src/3rd-party/tokio-unix-ipc"}
+tokio-unix-ipc = { git = "https://github.com/conorbros/tokio-unix-ipc", branch="main" }

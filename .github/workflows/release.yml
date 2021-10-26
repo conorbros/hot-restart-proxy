@@ -1,0 +1,51 @@
+---
+name: "tagged-release"
+
+# on:
+#   push:
+#     tags:
+#       - "v*"
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  tagged-release:
+    name: "Tagged Release"
+    runs-on: ubuntu-20.04
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install latest stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Build & test
+        run: |
+          # build glibc
+          #cargo build --release
+          cargo build # just build debug while testing so it's quicker
+          mkdir -p hot-restart-proxy-release
+          cp target/debug/hot-restart-proxy hot-restart-proxy-release
+          tar -cvzf hot-restart-proxy-proxy-linux_amd64-"$(cargo metadata --format-version 1 --offline --no-deps | jq -c -M -r '.packages[0].version')".tar.gz hot-restart-proxy-release
+          rm -rf hot-restart-proxy-release
+
+          # build musl
+          mkdir -p hot-restart-proxy-release
+          docker run --rm -v "$(pwd)":/home/rust/src ekidd/rust-musl-builder bash -c "sudo chown -R rust:rust .; cargo build"
+          sudo chown -R $USER:$USER .
+          cp target/x86_64-unknown-linux-musl/debug/hot-restart-proxy hot-restart-proxy-release
+          tar -cvzf hot-restart-proxy-static_linux_amd64-"$(cargo metadata --format-version 1 --offline --no-deps | jq -c -M -r '.packages[0].version')".tar.gz hot-restart-proxy-release
+          rm -rf hot-restart-proxy-release
+
+          echo "$(ls)"
+
+      - name: Publish
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          prerelease: false
+          files: |
+            *.tar.gz
