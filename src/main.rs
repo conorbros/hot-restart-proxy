@@ -43,7 +43,9 @@ async fn main() -> Result<()> {
                         trigger_shutdown_tx.send(true).unwrap();
                         println!("takeover received");
                         let resources = ipc::collect_socket_pairs(handover_rx).await.unwrap();
+                        println!("collected socket pairs");
                         bootstrapper.send(Message::Resources(resources)).await.unwrap();
+                        println!("sent socket pairs");
                     }
                     Message::Shutdown()=> {},
                     _ => panic!("unexpected message received")

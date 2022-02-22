@@ -38,16 +38,20 @@ pub struct Resources {
 pub async fn unix_socket_bootstrap() -> Result<(Bootstrapper, Sender<Message>, Receiver<Message>)> {
     let bootstrapper = tokio_unix_ipc::Bootstrapper::bind("/tmp/proto-socket")?;
     let (tx, rx) = tokio_unix_ipc::channel::<Message>()?;
+    println!("bootstrapped socket");
 
     Ok((bootstrapper, tx, rx))
 }
 
 pub async fn unix_socket_listen() -> Result<(Sender<Message>, Receiver<Message>)> {
     let rx = Receiver::<Message>::connect("/tmp/proto-socket").await?;
+    println!("socket listening");
     let tx = match rx.recv().await.unwrap() {
         Message::GiveSender(tx) => tx,
         _ => panic!("Expected Message::Sender"),
     };
+
+    println!("sender received");
 
     Ok((tx, rx))
 }
